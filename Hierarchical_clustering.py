@@ -4,17 +4,19 @@
 @author:Weaki
 @time:2025-10-08
 """
+import datetime
 
 import pandas as pd
 from typing import List, Dict, Any
 from collections import defaultdict
 import time
 # 导入用于Excel格式化的库
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 import sys
 import io
 import os
+import re
 from gooey import Gooey, GooeyParser
 # --- 强制标准输出/错误流使用 UTF-8 编码并启用行缓冲 ---
 # 这是一个处理打包后程序（尤其是在Windows上）Unicode错误和输出延迟问题的稳定方法。
@@ -66,7 +68,8 @@ class HierarchicalCluster:
         if self.complete_mode:
             values_to_process = self.all_values[current_col]
         else:
-            if len(indices) == 0: return {}
+            if len(indices) == 0:
+                return {}
             values_to_process = sorted(self.df.loc[indices, current_col].unique())
         groups = defaultdict(list)
         for idx in indices:
@@ -135,8 +138,8 @@ class HierarchicalCluster:
     def get_level_indices(self, level: int) -> Dict[str, List[int]]:
         if level < 0 or level >= len(self.columns):
             raise ValueError(f"层级必须在 0 到 {len(self.columns) - 1} 之间")
-        result = {};
-        self._collect_level_nodes(self.cluster_tree, 0, level, result);
+        result = {}
+        self._collect_level_nodes(self.cluster_tree, 0, level, result)
         return result
 
     def _get_all_node_counts(self) -> Dict[str, int]:
@@ -218,6 +221,7 @@ class HierarchicalCluster:
             print("❌ 错误: 请先调用 .cluster() 方法执行聚类。")
             return
         try:
+            print(f"\n📦 正在导出(明细版)Excel到: {output_path}")
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
                 all_path_counts = {}
                 # 一次性获取所有计数
@@ -289,7 +293,7 @@ class HierarchicalCluster:
                                                                                                      index=False)
                         self._format_and_merge_sheet(writer.sheets.get('第三级汇总'), merge_cols_indices=[0, 1])
 
-            print(f"\n✅ 成功导出最终版格式化Excel文件到: {output_path}")
+            print(f"\n✅ 成功导出明细版格式化Excel文件到: {output_path}")
         except Exception as e:
             print(f"\n❌ 导出Excel失败: {e}")
             print("  请确保您已安装 'openpyxl' 库 (在终端或命令提示符中运行: pip install openpyxl)")
@@ -510,17 +514,16 @@ def run_clustering_logic(args, columns_list):
         # 4. 导出到Excel (使用来自GUI的 'output_directory')
 
         # 方式一：原始明细版
-        output_detailed = os.path.join(args.output_directory, "Excel聚类结果(明细版).xlsx")
-        print(f"\n📦 正在导出(明细版)Excel到: {output_detailed}")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_detailed = os.path.join(args.output_directory, f"Excel聚类结果(明细版)_{timestamp}.xlsx")
         clusterer.export_to_excel_by_level(output_detailed)
 
         # 方式二：新的聚合版 (使用来自GUI的 'threshold')
-        output_agg = os.path.join(args.output_directory, "Excel聚类结果(聚合版).xlsx")
+        output_agg = os.path.join(args.output_directory, f"Excel聚类结果(聚合版)_{timestamp}.xlsx")
 
         # 从GUI的百分比 (0-100) 转换为小数 (0.0-1.0)
         threshold_percent = args.threshold / 100.0
 
-        print(f"\n📦 正在导出(聚合版)Excel到: {output_agg}")
         clusterer.export_to_excel_aggregated(output_agg, threshold_percent=threshold_percent)
 
         print(f"\n" + "=" * 60)
@@ -539,11 +542,111 @@ def run_clustering_logic(args, columns_list):
         traceback.print_exc()  # 向控制台打印详细错误
 
 
+"""
+分组统计
+"""
+
+
+def clean_sheet_name(name):
+    """
+        Excel Sheet名称不能包含特殊字符 : \ / ? * [ ]
+        且长度不能超过31个字符。
+    """
+    if pd.isna(name):
+        return "Unknown"
+    # 将名称转换为字符串
+    name = str(name)
+    # 替换非法字符为下划线
+    name = re.sub(r'[\\/*?:\[\]]', '_', name)
+    # 截取前31个字符
+    return name[:31]
+
+def run_stats_logic(args):
+    """ 执行分表统计逻辑 """
+    file_path = args.stat_input_file
+    group_col = args.stat_group_col
+    target_col = args.stat_target_col
+
+    print("=" * 60)
+    print("📊 正在启动：Excel 分表统计工具")
+    print(f"  源文件: {file_path}")
+    print(f"  分表依据列: {group_col}")
+    print(f"  统计目标列: {target_col}")
+    print("=" * 60)
+    try:
+        # 读取Excel文件
+        print(f"正在读取文件：{file_path}")
+        df = pd.read_excel(file_path)
+        # 检查列是否存在
+        if group_col not in df.columns or target_col not in df.columns:
+            print(f"错误: 列名 '{group_col}' 或 '{target_col}' 在文件中不存在。")
+            return
+        # 处理目标列的空值 (关键步骤)
+        # 将 NaN 填充为 "空值"，确保统计时包含在内
+        df[target_col] = df[target_col].fillna("空值")
+
+        # 同样处理分表列的空值，防止分表时报错
+        df[group_col] = df[group_col].fillna("未分类")
+        # 准备输出文件名(增加时间戳放置覆盖)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"分组统计结果_{timestamp}.xlsx"
+        # 创建ExcelWriter对象
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # 获取分表列的所有唯一值
+            unique_groups = df[group_col].unique()
+            print(f"检测到 {group_col}列有{len(unique_groups)} 个分类，开始处理...")
+            for group_val in unique_groups:
+                # 筛选数据
+                sub_df = df[df[group_col] == group_val]
+
+                # 统计频次
+                # value_counts 默认就是降序排列 (Descending)
+                stats = sub_df[target_col].value_counts().reset_index()
+                stats.columns = [target_col, '数量']
+
+                # 计算百分比
+                total_count = stats['数量'].sum()
+                stats['百分比'] = (stats['数量']/total_count).apply(lambda x: f"{x:.2%}")
+                # 写入Excel
+                sheet_name = clean_sheet_name(group_val)
+                # 将数据写入 Excel，从第 2 行开始写 (startrow=1)，给顶部标题留空间
+                # index=False 不写入索引列
+                stats.to_excel(writer, sheet_name=sheet_name, startrow=1, index=False)
+                # --- C. 样式调整 (合并居中标题) ---
+
+                # 获取当前 sheet 对象
+                worksheet = writer.sheets[sheet_name]
+
+                # 1. 设置顶部合并标题 (A1 到 C1)
+                # 标题内容：显示分表列的名称和当前值，例如 "部门: 技术部"
+                header_text = f"{group_col}: {group_val}"
+                worksheet.merge_cells('A1:C1')  # 合并第一行的前三列
+                cell_title = worksheet['A1']
+                cell_title.value = header_text
+
+                # 设置标题样式：居中、加粗、加大字号、背景色
+                cell_title.alignment = Alignment(horizontal='center', vertical='center')
+                cell_title.font = Font(bold=True, size=14, color="FFFFFF")
+                cell_title.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+
+                # 2. 调整列宽 (让每一列稍微宽一点，好看)
+                worksheet.column_dimensions['A'].width = 25
+                worksheet.column_dimensions['B'].width = 15
+                worksheet.column_dimensions['C'].width = 15
+
+                print(f"   ✅ 已生成分表: {sheet_name} (行数: {len(stats)})")
+
+        print(f"\n🎉 全部完成！输出文件已保存为: {output_file}")
+    except FileNotFoundError:
+        print("错误: 找不到指定的文件，请检查路径。")
+    except Exception as e:
+        print(f"发生未知错误: {e}")
 # ============ Gooey 界面定义 ============
 
 @Gooey(
-    program_name="Excel 层次聚类工具",
-    program_description="读取Excel文件并按指定列进行多级聚类和汇总",
+    program_name="Excel标签类表格处理工具",
+    program_description="聚类/统计",
+    navigation='TABBED',  # 关键设置：启用侧边栏/标签页模式
     default_size=(800, 600),
     language='chinese',  # 指定Gooey语言为中文
     encoding='UTF-8',  # 确保编码
@@ -554,18 +657,25 @@ def main():
     """
     Gooey的主函数，用于定义GUI界面
     """
-    parser = GooeyParser(description="配置聚类选项")
+    parser = GooeyParser(description="请选择左侧的功能模块进行操作")
 
+    # 创建子解析器 (Subparsers)
+    # dest='command' 用于后续判断用户选了哪个功能
+    subs = parser.add_subparsers(help='功能列表', dest='command')
+    # ========================================================
+    # 功能 1: 聚类分析
+    # ========================================================
+    cluster_parser = subs.add_parser('Clustering', help='配置聚类选项')
     # --- 1. 输入设置 ---
-    input_group = parser.add_argument_group("1. 输入设置", "选择源文件和分组列")
-    input_group.add_argument(
+    c_input_group = cluster_parser.add_argument_group("1. 输入设置", "选择源文件和分组列")
+    c_input_group.add_argument(
         'input_file',
         metavar='Excel 源文件',
         help='请选择包含数据的Excel文件 (.xlsx, .xls)',
         widget='FileChooser',
         gooey_options={'wildcard': 'Excel 文件 (*.xlsx;*.xls)|*.xlsx;*.xls'}
     )
-    input_group.add_argument(
+    c_input_group.add_argument(
         'group_columns',
         metavar='分组列名 (必填)',
         help='请按顺序输入要分组的列名，用英文逗号“,”隔开 (例如: A,B,C)',
@@ -580,8 +690,8 @@ def main():
     )
 
     # --- 2. 输出设置 ---
-    output_group = parser.add_argument_group("2. 输出设置", "选择报告保存位置")
-    output_group.add_argument(
+    c_output_group = cluster_parser.add_argument_group("2. 输出设置", "选择报告保存位置")
+    c_output_group.add_argument(
         'output_directory',
         metavar='报告保存目录',
         help='所有生成的Excel报告将保存在此文件夹中',
@@ -589,15 +699,15 @@ def main():
     )
 
     # --- 3. 聚类选项 ---
-    options_group = parser.add_argument_group("3. 聚类选项", "配置聚类和聚合报告的行为")
-    options_group.add_argument(
+    c_options_group = cluster_parser.add_argument_group("3. 聚类选项", "配置聚类和聚合报告的行为")
+    c_options_group.add_argument(
         '--complete_mode',
         metavar='完整模式 (查漏)',
-        help='勾选后，将分析所有可能的组合，并报告空缺项 (见"完整模式"说明)',
+        help='勾选后，将分析所有可能的组合，并报告空缺项',
         action='store_true',  # 生成复选框
         default=False
     )
-    options_group.add_argument(
+    c_options_group.add_argument(
         '--threshold',
         metavar='聚合阈值 (%)',
         help='在“聚合版”报告中，占比低于此百分比的子项将被隐藏',
@@ -607,38 +717,74 @@ def main():
         type=int  # 确保Gooey返回整数
     )
 
-    # 解析来自Gooey的参数
+    # ========================================================
+    # 功能 2: 分表统计
+    # ========================================================
+    stat_parser = subs.add_parser('Statistics', help='分表统计与占比')
+
+    s_group = stat_parser.add_argument_group("分表统计设置", "根据某一列拆分Sheet并统计另一列的占比")
+
+    s_group.add_argument(
+        'stat_input_file',
+        metavar='Excel 源文件',
+        help='选择要统计的数据表',
+        widget='FileChooser',
+        gooey_options={'wildcard': 'Excel 文件 (*.xlsx;*.xls)|*.xlsx;*.xls'}
+    )
+
+    s_group.add_argument(
+        'stat_group_col',
+        metavar='分表列 (Group By)',
+        help='将根据此列的不同值生成不同的Sheet',
+        widget='TextField'
+    )
+
+    s_group.add_argument(
+        'stat_target_col',
+        metavar='统计列 (Count)',
+        help='将统计此列在每个Sheet下的数量和百分比',
+        widget='TextField'
+    )
+
+    # ========================================================
+    # 解析与分发
+    # ========================================================
     args = parser.parse_args()
 
-    # --- 4. 参数处理与逻辑调用 ---
-    try:
-        # 转换逗号分隔的字符串为列表
-        columns_list = [col.strip() for col in args.group_columns.split(',') if col.strip()]
-        if not columns_list:
-            # 再次检查，以防Gooey验证器失效
-            print("❌ 错误: “分组列名”不能为空，请至少输入一个列名。")
-            return
+    # 根据用户选择的子命令 (Clustering 或 Statistics) 分发到不同的逻辑函数
+    if args.command == 'Clustering':
+        # --- 4. 参数处理与逻辑调用 ---
+        try:
+            # 转换逗号分隔的字符串为列表
+            columns_list = [col.strip() for col in args.group_columns.split(',') if col.strip()]
+            if not columns_list:
+                # 再次检查，以防Gooey验证器失效
+                print("❌ 错误: “分组列名”不能为空，请至少输入一个列名。")
+                return
 
-        print("=" * 60)
-        print("🚀 开始执行聚类... (请稍候，完成后会弹出提示)")
-        print(f"  源文件: {args.input_file}")
-        print(f"  分组列: {columns_list}")
-        print(f"  保存目录: {args.output_directory}")
-        print(f"  完整模式: {'是' if args.complete_mode else '否'}")
-        print(f"  聚合阈值: {args.threshold}%")
-        print("=" * 60)
+            print("=" * 60)
+            print("🚀 开始执行聚类... (请稍候，完成后会弹出提示)")
+            print(f"  源文件: {args.input_file}")
+            print(f"  分组列: {columns_list}")
+            print(f"  保存目录: {args.output_directory}")
+            print(f"  完整模式: {'是' if args.complete_mode else '否'}")
+            print(f"  聚合阈值: {args.threshold}%")
+            print("=" * 60)
 
-        # 调用核心逻辑
-        run_clustering_logic(args, columns_list)
+            # 调用核心逻辑
+            run_clustering_logic(args, columns_list)
 
-    except Exception as e:
-        print(f"❌ 发生致命错误: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)  # 退出并显示错误
+        except Exception as e:
+            print(f"❌ 发生致命错误: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)  # 退出并显示错误
+    elif args.command == 'Statistics':
+        run_stats_logic(args)
+    else:
+        print("请选择一个功能运行。")
 
 
 # ============ 程序入口 ============
-
 if __name__ == "__main__":
     main()
